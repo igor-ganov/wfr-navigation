@@ -11,6 +11,7 @@ const TAP_MOVE_LIMIT = 10; // px — movement under this counts as a tap
 const TAP_TIME_LIMIT = 500; // ms — a tap must be quick
 const SWIPE_MIN_DISTANCE = 48; // px — horizontal travel to count as a swipe
 const SWIPE_RATIO = 1.4; // horizontal must dominate vertical by this factor
+const AXIS_LOCK_THRESHOLD = 8; // px — first movement past this locks the gesture axis
 
 const isEditable = (node: EventTarget | undefined): boolean => {
   if (!(node instanceof HTMLElement)) return false;
@@ -90,6 +91,7 @@ export class WfrViewerNav extends LitElement {
   #touchStartX = 0;
   #touchStartY = 0;
   #touchStartTime = 0;
+  #touchAxis: 'x' | 'y' | undefined = undefined;
 
   override connectedCallback(): void {
     super.connectedCallback();
@@ -154,6 +156,7 @@ export class WfrViewerNav extends LitElement {
     next.addEventListener('pointerenter', this.#onPointerEnter);
     next.addEventListener('pointerleave', this.#onPointerLeave);
     next.addEventListener('touchstart', this.#onTouchStart, { passive: true });
+    next.addEventListener('touchmove', this.#onTouchMove, { passive: true });
     next.addEventListener('touchend', this.#onTouchEnd, { passive: true });
   }
 
@@ -168,6 +171,7 @@ export class WfrViewerNav extends LitElement {
     bound.removeEventListener('pointerenter', this.#onPointerEnter);
     bound.removeEventListener('pointerleave', this.#onPointerLeave);
     bound.removeEventListener('touchstart', this.#onTouchStart);
+    bound.removeEventListener('touchmove', this.#onTouchMove);
     bound.removeEventListener('touchend', this.#onTouchEnd);
     this.#boundTarget = undefined;
   }
@@ -252,11 +256,26 @@ export class WfrViewerNav extends LitElement {
       return;
     }
     this.#touchTracking = true;
+    this.#touchAxis = undefined;
     // A tap that begins on the prev/next buttons must not also toggle.
     this.#touchOnControl = event.composedPath().includes(this);
     this.#touchStartX = touch.clientX;
     this.#touchStartY = touch.clientY;
     this.#touchStartTime = event.timeStamp;
+  };
+
+  /** Lock the gesture axis on first movement so a vertical scroll never pages. */
+  #onTouchMove = (event: Event): void => {
+    if (!(event instanceof TouchEvent) || !this.#touchTracking || this.#touchAxis !== undefined) {
+      return;
+    }
+    const touch = event.touches[0];
+    if (touch === undefined) return;
+    const dx = Math.abs(touch.clientX - this.#touchStartX);
+    const dy = Math.abs(touch.clientY - this.#touchStartY);
+    if (dx > AXIS_LOCK_THRESHOLD || dy > AXIS_LOCK_THRESHOLD) {
+      this.#touchAxis = dx > dy ? 'x' : 'y';
+    }
   };
 
   #onTouchEnd = (event: Event): void => {
@@ -270,14 +289,20 @@ export class WfrViewerNav extends LitElement {
     const dt = event.timeStamp - this.#touchStartTime;
     const absX = Math.abs(dx);
     const absY = Math.abs(dy);
-    // Horizontal swipe → page (left = next, right = previous).
-    if (absX >= SWIPE_MIN_DISTANCE && absX > absY * SWIPE_RATIO) {
+    // Horizontal swipe → page (left = next, right = previous). Only when the
+    // gesture locked to the horizontal axis, so a vertical scroll never pages.
+    if (this.#touchAxis === 'x' && absX >= SWIPE_MIN_DISTANCE && absX > absY * SWIPE_RATIO) {
       if (dx < 0) this.#emitNext();
       else this.#emitPrev();
       return;
     }
-    // Quick, near-stationary touch → toggle the controls.
-    if (absX <= TAP_MOVE_LIMIT && absY <= TAP_MOVE_LIMIT && dt <= TAP_TIME_LIMIT) {
+    // Quick, near-stationary touch (no axis lock) → toggle the controls.
+    if (
+      this.#touchAxis === undefined &&
+      absX <= TAP_MOVE_LIMIT &&
+      absY <= TAP_MOVE_LIMIT &&
+      dt <= TAP_TIME_LIMIT
+    ) {
       this.#toggle();
     }
   };
