@@ -2,7 +2,15 @@ import { css, html, LitElement, type PropertyValues, type TemplateResult } from 
 import { customElement, property } from 'lit/decorators.js';
 import { WFR_NEXT, WFR_PREV } from './nav-events';
 
-const ACTIVITY_EVENTS: readonly string[] = ['pointermove', 'pointerdown', 'touchstart', 'focusin'];
+// Mouse/keyboard reveal the controls on activity; touch is handled separately
+// (single tap toggles, horizontal swipe pages) so scrolling never flashes them.
+const POINTER_ACTIVITY_EVENTS: readonly string[] = ['pointermove', 'pointerdown'];
+
+// Touch gesture thresholds.
+const TAP_MOVE_LIMIT = 10; // px — movement under this counts as a tap
+const TAP_TIME_LIMIT = 500; // ms — a tap must be quick
+const SWIPE_MIN_DISTANCE = 48; // px — horizontal travel to count as a swipe
+const SWIPE_RATIO = 1.4; // horizontal must dominate vertical by this factor
 
 const isEditable = (node: EventTarget | undefined): boolean => {
   if (!(node instanceof HTMLElement)) return false;
@@ -15,10 +23,16 @@ const isEditable = (node: EventTarget | undefined): boolean => {
 };
 
 /**
- * Headless paging controls. Renders accessible prev/next buttons that fade in on
- * hover/tap/focus over a `target` (defaults to the parent element) and auto-hide
- * after `hideDelay` ms of inactivity. Left/Right arrows page while the target is
- * active. Emits bubbling, composed `wfr-prev` / `wfr-next` events.
+ * Headless paging controls. Renders accessible prev/next buttons.
+ *
+ * - **Mouse:** controls fade in on hover/movement over `target` and auto-hide
+ *   after `hideDelay` ms of inactivity.
+ * - **Keyboard:** Left/Right arrows page; focus reveals the controls.
+ * - **Touch:** a single tap toggles the controls (tap again to hide); a
+ *   horizontal swipe pages (swipe left → next, swipe right → previous). Scrolling
+ *   never reveals the controls.
+ *
+ * Emits bubbling, composed `wfr-prev` / `wfr-next` events.
  */
 @customElement('wfr-viewer-nav')
 export class WfrViewerNav extends LitElement {
@@ -70,6 +84,12 @@ export class WfrViewerNav extends LitElement {
   #boundTarget: EventTarget | undefined = undefined;
   #hideTimer: ReturnType<typeof setTimeout> | undefined = undefined;
   #pointerInside = false;
+  #lastInputTouch = false;
+  #touchTracking = false;
+  #touchOnControl = false;
+  #touchStartX = 0;
+  #touchStartY = 0;
+  #touchStartTime = 0;
 
   override connectedCallback(): void {
     super.connectedCallback();
@@ -126,21 +146,29 @@ export class WfrViewerNav extends LitElement {
     if (next === this.#boundTarget) return;
     this.#unbind();
     this.#boundTarget = next;
-    for (const name of ACTIVITY_EVENTS) {
-      next.addEventListener(name, this.poke, { passive: true });
+    for (const name of POINTER_ACTIVITY_EVENTS) {
+      next.addEventListener(name, this.#onPointerActivity, { passive: true });
     }
+    next.addEventListener('focusin', this.#onFocusIn, { passive: true });
     next.addEventListener('keydown', this.#onKeydown);
     next.addEventListener('pointerenter', this.#onPointerEnter);
     next.addEventListener('pointerleave', this.#onPointerLeave);
+    next.addEventListener('touchstart', this.#onTouchStart, { passive: true });
+    next.addEventListener('touchend', this.#onTouchEnd, { passive: true });
   }
 
   #unbind(): void {
     const bound = this.#boundTarget;
     if (bound === undefined) return;
-    for (const name of ACTIVITY_EVENTS) bound.removeEventListener(name, this.poke);
+    for (const name of POINTER_ACTIVITY_EVENTS) {
+      bound.removeEventListener(name, this.#onPointerActivity);
+    }
+    bound.removeEventListener('focusin', this.#onFocusIn);
     bound.removeEventListener('keydown', this.#onKeydown);
     bound.removeEventListener('pointerenter', this.#onPointerEnter);
     bound.removeEventListener('pointerleave', this.#onPointerLeave);
+    bound.removeEventListener('touchstart', this.#onTouchStart);
+    bound.removeEventListener('touchend', this.#onTouchEnd);
     this.#boundTarget = undefined;
   }
 
@@ -187,14 +215,77 @@ export class WfrViewerNav extends LitElement {
     }
   };
 
-  #onPointerEnter = (): void => {
+  /** Reveal on mouse/pen activity only — touch is toggle-driven. */
+  #onPointerActivity = (event: Event): void => {
+    if (event instanceof PointerEvent && event.pointerType === 'touch') {
+      this.#lastInputTouch = true;
+      return;
+    }
+    this.#lastInputTouch = false;
+    this.poke();
+  };
+
+  /** Reveal on keyboard focus, but not on the focus a tap incidentally causes. */
+  #onFocusIn = (): void => {
+    if (this.#lastInputTouch) return;
+    this.poke();
+  };
+
+  #onPointerEnter = (event: Event): void => {
+    if (event instanceof PointerEvent && event.pointerType === 'touch') return;
     this.#pointerInside = true;
     this.poke();
   };
 
-  #onPointerLeave = (): void => {
+  #onPointerLeave = (event: Event): void => {
+    if (event instanceof PointerEvent && event.pointerType === 'touch') return;
     this.#pointerInside = false;
     this.#restartTimer();
+  };
+
+  #onTouchStart = (event: Event): void => {
+    if (!(event instanceof TouchEvent)) return;
+    this.#lastInputTouch = true;
+    const touch = event.touches.length === 1 ? event.touches[0] : undefined;
+    if (touch === undefined) {
+      this.#touchTracking = false;
+      return;
+    }
+    this.#touchTracking = true;
+    // A tap that begins on the prev/next buttons must not also toggle.
+    this.#touchOnControl = event.composedPath().includes(this);
+    this.#touchStartX = touch.clientX;
+    this.#touchStartY = touch.clientY;
+    this.#touchStartTime = event.timeStamp;
+  };
+
+  #onTouchEnd = (event: Event): void => {
+    if (!(event instanceof TouchEvent) || !this.#touchTracking) return;
+    this.#touchTracking = false;
+    if (this.#touchOnControl) return;
+    const touch = event.changedTouches[0];
+    if (touch === undefined) return;
+    const dx = touch.clientX - this.#touchStartX;
+    const dy = touch.clientY - this.#touchStartY;
+    const dt = event.timeStamp - this.#touchStartTime;
+    const absX = Math.abs(dx);
+    const absY = Math.abs(dy);
+    // Horizontal swipe → page (left = next, right = previous).
+    if (absX >= SWIPE_MIN_DISTANCE && absX > absY * SWIPE_RATIO) {
+      if (dx < 0) this.#emitNext();
+      else this.#emitPrev();
+      return;
+    }
+    // Quick, near-stationary touch → toggle the controls.
+    if (absX <= TAP_MOVE_LIMIT && absY <= TAP_MOVE_LIMIT && dt <= TAP_TIME_LIMIT) {
+      this.#toggle();
+    }
+  };
+
+  /** Toggle visibility; touch is tap-controlled, so cancel any auto-hide. */
+  #toggle = (): void => {
+    this.#clearTimer();
+    this.visible = !this.visible;
   };
 }
 
