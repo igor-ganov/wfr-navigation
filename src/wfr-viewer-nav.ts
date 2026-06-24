@@ -77,6 +77,8 @@ export class WfrViewerNav extends LitElement {
   @property({ type: Boolean }) canNext = false;
   /** Idle time in ms before controls auto-hide. 0 keeps them always visible. */
   @property({ type: Number }) hideDelay = 2500;
+  /** Whether a horizontal swipe pages. Disable when a carousel owns paging. */
+  @property({ type: Boolean }) swipe = true;
   /** Whether controls are currently visible (reflected for styling). */
   @property({ type: Boolean, reflect: true }) visible = false;
   /** Element whose activity reveals the controls. Defaults to the parent. */
@@ -310,7 +312,7 @@ export class WfrViewerNav extends LitElement {
     const absY = Math.abs(dy);
     // Horizontal swipe → page (left = next, right = previous). Only when the
     // gesture locked to the horizontal axis, so a vertical scroll never pages.
-    if (this.#touchAxis === 'x' && absX >= SWIPE_MIN_DISTANCE && absX > absY * SWIPE_RATIO) {
+    if (this.swipe && this.#touchAxis === 'x' && absX >= SWIPE_MIN_DISTANCE && absX > absY * SWIPE_RATIO) {
       // If the swipe scrolled horizontally-scrollable content (e.g. a wide
       // table), it was a scroll, not a page turn. When that content can't move
       // (none, or already at the edge) scrollLeft is unchanged → page.
