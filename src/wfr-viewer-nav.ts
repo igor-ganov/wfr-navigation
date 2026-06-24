@@ -92,6 +92,8 @@ export class WfrViewerNav extends LitElement {
   #touchStartY = 0;
   #touchStartTime = 0;
   #touchAxis: 'x' | 'y' | undefined = undefined;
+  #scrollEl: Element | undefined = undefined;
+  #scrollLeftStart = 0;
 
   override connectedCallback(): void {
     super.connectedCallback();
@@ -257,12 +259,29 @@ export class WfrViewerNav extends LitElement {
     }
     this.#touchTracking = true;
     this.#touchAxis = undefined;
+    const path = event.composedPath();
     // A tap that begins on the prev/next buttons must not also toggle.
-    this.#touchOnControl = event.composedPath().includes(this);
+    this.#touchOnControl = path.includes(this);
+    // Remember any horizontally-scrollable content under the finger so a swipe
+    // that scrolls it (e.g. a wide table) does not also page.
+    this.#scrollEl = this.#findScrollableX(path);
+    this.#scrollLeftStart = this.#scrollEl?.scrollLeft ?? 0;
     this.#touchStartX = touch.clientX;
     this.#touchStartY = touch.clientY;
     this.#touchStartTime = event.timeStamp;
   };
+
+  /** First horizontally-scrollable element on the touch path, up to the target. */
+  #findScrollableX(path: readonly EventTarget[]): Element | undefined {
+    for (const node of path) {
+      if (node instanceof Element && node.scrollWidth > node.clientWidth + 1) {
+        const overflowX = getComputedStyle(node).overflowX;
+        if (overflowX === 'auto' || overflowX === 'scroll') return node;
+      }
+      if (node === this.#boundTarget) break;
+    }
+    return undefined;
+  }
 
   /** Lock the gesture axis on first movement so a vertical scroll never pages. */
   #onTouchMove = (event: Event): void => {
@@ -292,6 +311,13 @@ export class WfrViewerNav extends LitElement {
     // Horizontal swipe → page (left = next, right = previous). Only when the
     // gesture locked to the horizontal axis, so a vertical scroll never pages.
     if (this.#touchAxis === 'x' && absX >= SWIPE_MIN_DISTANCE && absX > absY * SWIPE_RATIO) {
+      // If the swipe scrolled horizontally-scrollable content (e.g. a wide
+      // table), it was a scroll, not a page turn. When that content can't move
+      // (none, or already at the edge) scrollLeft is unchanged → page.
+      const scrolled =
+        this.#scrollEl !== undefined &&
+        Math.abs(this.#scrollEl.scrollLeft - this.#scrollLeftStart) > 2;
+      if (scrolled) return;
       if (dx < 0) this.#emitNext();
       else this.#emitPrev();
       return;
